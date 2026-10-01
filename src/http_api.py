@@ -13,6 +13,10 @@ RECORD_RE = re.compile(r"^/api/records/(\d+)$")
 ACTION_RE = re.compile(r"^/api/records/(\d+)/actions/([a-z_]+)$")
 AUDIT_RE = re.compile(r"^/api/records/(\d+)/audit$")
 
+SCHED_PLAN_RE = re.compile(r"^/api/scheduling/plans/(\d+)$")
+SCHED_PLAN_ACTION_RE = re.compile(r"^/api/scheduling/plans/(\d+)/(berth|cancel)$")
+SCHED_BATCH_RE = re.compile(r"^/api/scheduling/batches/([^/]+)$")
+
 
 def make_handler(service: Any, static_dir: Path):
     class Handler(BaseHTTPRequestHandler):
@@ -87,6 +91,31 @@ def make_handler(service: Any, static_dir: Path):
                 if parsed.path == "/api/stats":
                     self._send(200, service.stats(self._actor()))
                     return
+                if parsed.path == "/api/scheduling/plans":
+                    query = parse_qs(parsed.query)
+                    self._send(200, service.scheduling.list_plans(
+                        self._actor(),
+                        state=query.get("state", [None])[0],
+                        batch_id=query.get("batch_id", [None])[0],
+                    ))
+                    return
+                match = SCHED_PLAN_RE.match(parsed.path)
+                if match:
+                    self._send(200, service.scheduling.get_plan(self._actor(), int(match.group(1))))
+                    return
+                match = SCHED_BATCH_RE.match(parsed.path)
+                if match:
+                    self._send(200, service.scheduling.get_batch(self._actor(), match.group(1)))
+                    return
+                if parsed.path == "/api/scheduling/audit":
+                    query = parse_qs(parsed.query)
+                    self._send(200, service.scheduling.audit(
+                        self._actor(),
+                        scope=query.get("scope", [None])[0],
+                        ref=query.get("ref", [None])[0],
+                        limit=int(query.get("limit", ["200"])[0]),
+                    ))
+                    return
                 self._send(404, {"error": "not_found", "message": "路径不存在"})
             except Exception as exc:
                 self._handle_error(exc)
@@ -106,6 +135,24 @@ def make_handler(service: Any, static_dir: Path):
                         raise ValidationError("expected_version必须是整数")
                     record = service.act(self._actor(), int(match.group(1)), version, match.group(2), body.get("data", {}))
                     self._send(200, record)
+                    return
+                # ---- 潮汐 × 靠泊 × 拖轮/引航员 可恢复排班 ----
+                if parsed.path == "/api/scheduling/batches":
+                    self._send(200, service.scheduling.submit_batch(self._actor(), body))
+                    return
+                if parsed.path == "/api/scheduling/tide":
+                    self._send(200, service.scheduling.update_tide(self._actor(), body))
+                    return
+                if parsed.path == "/api/scheduling/resources":
+                    self._send(200, service.scheduling.update_resources(self._actor(), body))
+                    return
+                if parsed.path == "/api/scheduling/retry":
+                    self._send(200, service.scheduling.retry_planning(self._actor()))
+                    return
+                match = SCHED_PLAN_ACTION_RE.match(parsed.path)
+                if match:
+                    method = service.scheduling.berth_plan if match.group(2) == "berth" else service.scheduling.cancel_plan
+                    self._send(200, method(self._actor(), int(match.group(1)), body))
                     return
                 self._send(404, {"error": "not_found", "message": "路径不存在"})
             except Exception as exc:

@@ -6,6 +6,9 @@ from src.audit import AuditRecorder
 from src.http_api import create_server
 from src.repository import Repository
 from src.rules import DomainRules
+from src.scheduling.repository import SchedulingRepository
+from src.scheduling.resources import ResourceProvider
+from src.scheduling.service import SchedulingService
 from src.service import Service
 
 
@@ -17,7 +20,13 @@ DEFAULT_PORT = 8321
 def build_service(db_path: str) -> Service:
     repository = Repository(db_path)
     audit = AuditRecorder(repository)
-    return Service(repository, DomainRules(), audit)
+    service = Service(repository, DomainRules(), audit)
+
+    scheduling_repository = SchedulingRepository(db_path)
+    service.scheduling = SchedulingService(
+        scheduling_repository, ResourceProvider(scheduling_repository)
+    )
+    return service
 
 
 def parse_args():

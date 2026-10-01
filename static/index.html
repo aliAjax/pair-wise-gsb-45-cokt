@@ -3,31 +3,76 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>港口泊位与航道调度</title>
+  <title>港口潮汐进港排班</title>
   <style>
     body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 2rem; color: #17212b; }
-    main { max-width: 960px; margin: auto; }
-    button { padding: .55rem .9rem; cursor: pointer; }
-    pre { background: #f4f6f8; padding: 1rem; overflow: auto; border-radius: 8px; }
-    .row { display: flex; gap: 1rem; align-items: center; }
+    main { max-width: 1080px; margin: auto; }
+    h1 { font-size: 1.4rem; }
+    h2 { font-size: 1.05rem; margin-top: 1.6rem; }
+    button { padding: .5rem .85rem; cursor: pointer; margin-right: .5rem; margin-bottom: .4rem; }
+    pre { background: #f4f6f8; padding: 1rem; overflow: auto; border-radius: 8px; font-size: .85rem; }
+    .counts span { display: inline-block; background: #eef3fb; border-radius: 12px; padding: .2rem .7rem; margin: .15rem; font-size: .85rem; }
+    .counts b { color: #1c5fd0; }
+    textarea { width: 100%; box-sizing: border-box; font-family: ui-monospace, Menlo, monospace; font-size: .82rem; }
   </style>
 </head>
 <body>
 <main>
-  <h1>港口泊位与航道调度</h1>
-  <p>最小演示页。完整业务流程通过README中的JSON接口调用。</p>
-  <div class="row"><button id="load">加载记录</button><button id="stats">查看状态统计</button></div>
-  <pre id="output">点击上方按钮读取服务状态。</pre>
+  <h1>港口潮汐进港排班（可恢复）</h1>
+  <p>潮汐窗口 × 靠泊计划 × 拖轮/引航员互斥排班。窗口变更后未靠泊计划重排，已靠泊冻结；资源读取失败保留批次，重试按计划版本合并且不重复占用拖轮。</p>
+  <div class="counts" id="counts"></div>
+
+  <h2>1. 资源目录（拖轮 / 引航员）</h2>
+  <textarea id="resources" rows="2">{"tugboats":["T1","T2"],"pilots":["P1","P2"]}</textarea>
+  <p><button onclick="post('/api/scheduling/resources', 'resources')">更新资源并重排</button></p>
+
+  <h2>2. 潮汐表（24 个整点水位，米）</h2>
+  <textarea id="tide" rows="2">{"tide_levels":[0,0,0,0,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,0,0,0,0]}</textarea>
+  <p>
+    <button onclick="post('/api/scheduling/tide', 'tide')">更新潮汐窗口并重算</button>
+    <button onclick="post('/api/scheduling/tide', null, narrowTide)">收窄窗口（9-11）</button>
+    <button onclick="retry()">资源恢复后重试合并</button>
+  </p>
+
+  <h2>3. 提交进港批次（幂等）</h2>
+  <textarea id="batch" rows="8">{"batch_id":"B-0001","client_key":"client-0001","plans":[{"vessel":"海云号","berth":"B12","draft_m":10.2,"vessel_length_m":180,"start_hour":6,"service_hours":3},{"vessel":"长风号","berth":"B13","draft_m":9.8,"vessel_length_m":160,"start_hour":6,"service_hours":3}]}</textarea>
+  <p><button onclick="post('/api/scheduling/batches', 'batch')">提交批次</button></p>
+
+  <h2>4. 查询</h2>
+  <p>
+    <button onclick="loadPlans('')">全部计划</button>
+    <button onclick="loadPlans('?state=pending')">待确认</button>
+    <button onclick="loadPlans('?state=invalid')">冲突/失效</button>
+    <button onclick="loadPlans('?state=berthed')">已靠泊（冻结）</button>
+    <button onclick="show('/api/scheduling/audit')">审计时间线</button>
+    <button onclick="show('/api/stats')">旧记录统计</button>
+  </p>
+  <pre id="output">点击上方按钮开始。</pre>
 </main>
 <script>
-const headers = {"X-User-Id":"demo-admin","X-Role":"admin","X-Org":"demo"};
-async function show(path) {
-  const response = await fetch(path, {headers});
+const headers = {"X-User-Id":"duty-demo","X-Role":"port_controller","X-Org":"port","Content-Type":"application/json"};
+const narrowTide = {tide_levels: Array(9).fill(0).concat([12,12]).concat(Array(13).fill(0))};
+
+async function api(path, options) {
+  const response = await fetch(path, options);
   const data = await response.json();
+  if (data.counts) renderCounts(data.counts);
   document.getElementById("output").textContent = JSON.stringify(data, null, 2);
 }
-document.getElementById("load").onclick = () => show("/api/records?limit=20");
-document.getElementById("stats").onclick = () => show("/api/stats");
+function show(path) { api(path, {headers}); }
+function loadPlans(qs) { show("/api/scheduling/plans" + qs); }
+function post(path, areaId, override) {
+  const raw = override || JSON.parse(document.getElementById(areaId).value);
+  api(path, {method:"POST", headers, body: JSON.stringify(raw)});
+}
+function retry() { api("/api/scheduling/retry", {method:"POST", headers, body:"{}"}); }
+function renderCounts(c) {
+  const labels = [["pending","待确认"],["conflicts","冲突/失效"],["recovered","已恢复"],
+                  ["scheduled","已排班"],["berthed","已靠泊"],["cancelled","已取消"]];
+  document.getElementById("counts").innerHTML = labels
+    .map(([k,t]) => `<span>${t}: <b>${c[k] ?? "-"}</b></span>`).join("");
+}
+loadPlans("");
 </script>
 </body>
 </html>
