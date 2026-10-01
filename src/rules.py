@@ -1,13 +1,37 @@
-"""港口泊位与航道调度领域规则与状态转换。"""
-from typing import Any, Dict, Iterable, Tuple
+"""港口泊位与航道调度领域规则、状态转换与可恢复排班判定。"""
+from typing import Any, Dict, List, Tuple
 
-from .domain import Actor, Conflict, ValidationError, boolean, choice, integer, number, text, text_list
+from .domain import Conflict, ValidationError, boolean, choice, integer, number, text
 
 
 INITIAL_STATE = "draft"
 CREATE_ROLES = {'port_controller'}
-ACTION_ROLES = {'confirm': {'port_controller'}, 'berth': {'port_controller'}, 'depart': {'port_controller'}, 'cancel': {'port_controller'}}
-TRANSITIONS = {'confirm': {'draft': 'confirmed'}, 'berth': {'confirmed': 'berthed'}, 'depart': {'berthed': 'departed'}, 'cancel': {'draft': 'cancelled', 'confirmed': 'cancelled'}}
+ACTION_ROLES = {
+    'confirm': {'port_controller'},
+    'confirm_schedule': {'port_controller'},
+    'berth': {'port_controller'},
+    'depart': {'port_controller'},
+    'cancel': {'port_controller'},
+}
+TRANSITIONS = {
+    'confirm': {'draft': 'confirmed'},
+    'confirm_schedule': {'draft': 'confirmed'},
+    'berth': {'confirmed': 'berthed'},
+    'depart': {'berthed': 'departed'},
+    'cancel': {'draft': 'cancelled', 'confirmed': 'cancelled'},
+}
+
+# 排班（assignment）状态：
+# pending  -> 系统在计划窗口内排出槽位，等待值班员确认
+# queued   -> 容量不足被迫排队（窗口外/延迟槽位），等待资源释放
+# conflict -> 潮汐窗口内进水不足，无法排入
+# active   -> 已确认，占用拖轮与引航员
+# berthed  -> 已靠泊，结果锁定
+SCHEDULE_STATES = {"pending", "queued", "conflict", "active", "berthed"}
+PENDING_SCHEDULE_STATES = {"pending", "queued"}
+TERMINAL_RECORD_STATES = {"cancelled", "departed"}
+
+RESOURCE_KINDS = {"tug", "pilot"}
 
 
 class DomainRules:
@@ -54,19 +78,40 @@ class DomainRules:
         p["quay_ok"] = bool(p["berth_length_m"] >= p["vessel_length_m"] and p["safety_margin_m"] >= 0.5)
         return p
 
-    def check_create_conflicts(self, payload: Dict[str, Any], existing: Iterable[Dict[str, Any]]) -> None:
-        for item in existing:
-            other = item["payload"]
-            if item["state"] in {"cancelled", "departed"} or other.get("berth") != payload.get("berth"):
-                continue
-            if int(payload["eta_hour"]) < int(other.get("etd_hour", 0)) and int(payload["etd_hour"]) > int(other.get("eta_hour", 24)):
-                raise Conflict("同一泊位时间窗冲突")
-
     def require_transition(self, record: Dict[str, Any], action: str) -> str:
         allowed = TRANSITIONS.get(action, {}).get(record["state"])
         if allowed is None:
             raise Conflict("当前状态不允许执行%s" % action)
         return allowed
+
+    def validate_tide_windows(self, windows: Any) -> List[Dict[str, Any]]:
+        """校验潮汐窗口：[{"start_hour":0,"end_hour":6,"water_level_m":12.0}, ...]。"""
+        if not isinstance(windows, list) or not windows:
+            raise ValidationError("tide_windows必须是非空列表")
+        normalized: List[Dict[str, Any]] = []
+        for raw in windows:
+            if not isinstance(raw, dict):
+                raise ValidationError("潮汐窗口必须是对象")
+            start = integer(raw, "start_hour", 0, 23)
+            end = integer(raw, "end_hour", 1, 24)
+            level = number(raw, "water_level_m", 0)
+            if end <= start:
+                raise ValidationError("潮汐窗口end_hour必须晚于start_hour")
+            normalized.append({"start_hour": start, "end_hour": end, "water_level_m": level})
+        normalized.sort(key=lambda item: (item["start_hour"], item["end_hour"]))
+        for prev, cur in zip(normalized, normalized[1:]):
+            if cur["start_hour"] < prev["end_hour"]:
+                raise ValidationError("潮汐窗口不能重叠")
+        return normalized
+
+    def tide_feasible_hours(self, windows: List[Dict[str, Any]], draft_m: float, channel_depth_m: float) -> List[int]:
+        """返回进水足够的整点小时集合（水位与航道水深同时满足）。"""
+        required = float(draft_m) + 0.5
+        hours: List[int] = []
+        for window in windows:
+            if float(window["water_level_m"]) >= required and float(channel_depth_m) >= required:
+                hours.extend(range(int(window["start_hour"]), int(window["end_hour"])))
+        return hours
 
     def apply_action(self, record: Dict[str, Any], action: str, data: Dict[str, Any]) -> Tuple[str, Dict[str, Any], str]:
         new_state = self.require_transition(record, action)
@@ -74,7 +119,7 @@ class DomainRules:
         p = dict(record["payload"])
         changes: Dict[str, Any] = {}
         summary = ""
-        if action == "confirm":
+        if action in ("confirm", "confirm_schedule"):
             pilot = text(data, "pilot_id")
             changes["pilot_id"] = pilot
             summary = "已确认引航员"

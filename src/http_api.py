@@ -3,7 +3,7 @@ import json
 import re
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from .domain import Actor, DomainError, PermissionDenied, ValidationError
@@ -28,7 +28,7 @@ def make_handler(service: Any, static_dir: Path):
                 raise PermissionDenied("缺少X-User-Id或X-Role")
             return Actor(user_id=user_id, role=role, organization=self.headers.get("X-Org", ""))
 
-        def _body(self) -> Dict[str, Any]:
+        def _body(self) -> dict:
             try:
                 length = int(self.headers.get("Content-Length", "0"))
             except ValueError as exc:
@@ -64,6 +64,7 @@ def make_handler(service: Any, static_dir: Path):
         def do_GET(self) -> None:
             try:
                 parsed = urlparse(self.path)
+                query = parse_qs(parsed.query)
                 if parsed.path == "/health":
                     self._send(200, {"status": "ok", "service": "port-berth", "database": service.repository.health()})
                     return
@@ -72,9 +73,24 @@ def make_handler(service: Any, static_dir: Path):
                     self._send(200, page, "text/html; charset=utf-8")
                     return
                 if parsed.path == "/api/records":
-                    query = parse_qs(parsed.query)
                     records = service.list_records(self._actor(), state=query.get("state", [None])[0], limit=int(query.get("limit", ["100"])[0]))
                     self._send(200, {"items": records})
+                    return
+                if parsed.path == "/api/plans":
+                    data = service.plans(self._actor(), state=query.get("state", [None])[0], limit=int(query.get("limit", ["200"])[0]))
+                    self._send(200, data)
+                    return
+                if parsed.path == "/api/tide-windows":
+                    self._send(200, service.list_tide_windows(self._actor()))
+                    return
+                if parsed.path == "/api/resources":
+                    self._send(200, service.list_resources(self._actor(), kind=query.get("kind", [None])[0]))
+                    return
+                if parsed.path == "/api/system-events":
+                    self._send(200, service.system_feed(self._actor(), limit=int(query.get("limit", ["100"])[0])))
+                    return
+                if parsed.path == "/api/stats":
+                    self._send(200, service.stats(self._actor()))
                     return
                 match = RECORD_RE.match(parsed.path)
                 if match:
@@ -83,9 +99,6 @@ def make_handler(service: Any, static_dir: Path):
                 match = AUDIT_RE.match(parsed.path)
                 if match:
                     self._send(200, {"items": service.timeline(self._actor(), int(match.group(1)))})
-                    return
-                if parsed.path == "/api/stats":
-                    self._send(200, service.stats(self._actor()))
                     return
                 self._send(404, {"error": "not_found", "message": "路径不存在"})
             except Exception as exc:
@@ -98,6 +111,20 @@ def make_handler(service: Any, static_dir: Path):
                 if parsed.path == "/api/records":
                     record = service.create(self._actor(), body.get("reference", ""), body.get("data", {}))
                     self._send(201, record)
+                    return
+                if parsed.path == "/api/tide-windows":
+                    self._send(200, service.update_tide_windows(self._actor(), body.get("tide_windows", [])))
+                    return
+                if parsed.path == "/api/resources":
+                    self._send(200, service.upsert_resource(self._actor(), body))
+                    return
+                if parsed.path == "/api/resources/check":
+                    self._send(200, service.resource_health(self._actor()))
+                    return
+                if parsed.path == "/api/batches":
+                    result = service.submit_batch(self._actor(), body.get("record_ids", []))
+                    # 资源中途读取失败：已受理批次保留，以202返回并给出待重试条目。
+                    self._send(202 if result.get("failure") else 201, result)
                     return
                 match = ACTION_RE.match(parsed.path)
                 if match:

@@ -28,6 +28,11 @@ class PermissionDenied(DomainError):
     code = "permission_denied"
 
 
+class ServiceUnavailable(DomainError):
+    status = 503
+    code = "resource_unavailable"
+
+
 @dataclass(frozen=True)
 class Actor:
     user_id: str
